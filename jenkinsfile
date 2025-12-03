@@ -1,0 +1,46 @@
+pipeline {
+  agent any
+  environment {
+    DEV_REPO = "<DOCKERHUB_USER>/dev"
+    PROD_REPO = "<DOCKERHUB_USER>/prod"
+    DOCKER_CREDS = 'dockerhub-creds'
+  }
+  triggers { githubPush() }
+  stages {
+    stage('Checkout') { steps { checkout scm } }
+    stage('Build') { steps { sh 'docker build -t myapp:${BUILD_NUMBER} .' } }
+    stage('Push') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: "${DOCKER_CREDS}", usernameVariable:'DU', passwordVariable:'DP')]) {
+          script {
+            if (env.BRANCH_NAME == 'dev') {
+              sh 'echo $DP | docker login -u $DU --password-stdin'
+              sh "docker tag myapp:${BUILD_NUMBER} ${DEV_REPO}:${BUILD_NUMBER}"
+              sh "docker push ${DEV_REPO}:${BUILD_NUMBER}"
+              sh "docker tag myapp:${BUILD_NUMBER} ${DEV_REPO}:latest"
+              sh "docker push ${DEV_REPO}:latest"
+            } else if (env.BRANCH_NAME == 'master' || env.BRANCH_NAME == 'main') {
+              sh 'echo $DP | docker login -u $DU --password-stdin'
+              sh "docker tag myapp:${BUILD_NUMBER} ${PROD_REPO}:${BUILD_NUMBER}"
+              sh "docker push ${PROD_REPO}:${BUILD_NUMBER}"
+              sh "docker tag myapp:${BUILD_NUMBER} ${PROD_REPO}:latest"
+              sh "docker push ${PROD_REPO}:latest"
+            }
+          }
+        }
+      }
+    }
+    stage('Deploy') {
+      when { anyOf { branch 'dev'; branch 'master'; branch 'main' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'ec2-ssh-key', keyFileVariable: 'PEM', usernameVariable: 'SSH_USER')]) {
+          sh '''
+            chmod 600 "$PEM"
+            scp -o StrictHostKeyChecking=no deploy.sh ${SSH_USER}@<EC2_IP>:/home/${SSH_USER}/deploy.sh
+            ssh -o StrictHostKeyChecking=no -i "$PEM" ${SSH_USER}@<EC2_IP> "chmod +x ~/deploy.sh && ~/deploy.sh ${env.BRANCH_NAME == 'dev' ? '${DEV_REPO}:latest' : '${PROD_REPO}:latest'}"
+          '''
+        }
+      }
+    }
+  }
+}
